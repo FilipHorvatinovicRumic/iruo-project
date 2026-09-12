@@ -1,4 +1,4 @@
-param([string]$Location = "westeurope")
+param([string]$Location = "francecentral")
 $ErrorActionPreference = "Stop"
 $summary = Get-Content (Join-Path $PSScriptRoot "deployment-summary.json") -Raw | ConvertFrom-Json
 Write-Host "=== RESOURCE GROUPS ===" -ForegroundColor Cyan

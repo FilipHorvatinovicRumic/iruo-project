@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$CsvPath,
-    [string]$Location = "westeurope",
+    [string]$Location = "francecentral",
     [string]$AdminUsername = "azureadmin"
 )
 
@@ -9,12 +9,129 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 function Invoke-AzCli {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
-    $output = & az @Arguments 2>&1
+    $output = & az @args 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw ($output -join "`n")
     }
     return $output
+}
+
+
+function Test-SkuCapacityFailure {
+    param([string]$Message)
+    return ($Message -match 'SkuNotAvailable|Capacity Restrictions|AllocationFailed|OverconstrainedAllocationRequest|NotAvailableForSubscription')
+}
+
+function Deploy-HubWithSkuFallback {
+    param(
+        [string]$ResourceGroup,
+        [string]$TemplateFile,
+        [string]$AdminUsername,
+        [string]$SshPublicKey,
+        [string]$Location
+    )
+
+    $candidates = @(
+        'Standard_B1ms',
+        'Standard_B1s',
+        'Standard_F1s_v2',
+        'Standard_DS1_v2',
+        'Standard_D1_v2',
+        'Standard_A1_v2'
+    )
+
+    foreach ($sku in $candidates) {
+        Write-Host "Trying hub VM SKU: $sku" -ForegroundColor DarkCyan
+        $output = & az deployment group create --resource-group $ResourceGroup --name "techsprint-hub" --template-file $TemplateFile --parameters adminUsername=$AdminUsername sshPublicKey=$SshPublicKey location=$Location jumpVmSize=$sku leadVmSize=$sku --only-show-errors -o json 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            return [pscustomobject]@{
+                Result = (($output -join "`n") | ConvertFrom-Json)
+                Sku = $sku
+            }
+        }
+
+        $message = $output -join "`n"
+        if (Test-SkuCapacityFailure -Message $message) {
+            Write-Warning "SKU $sku is unavailable in $Location for this subscription/capacity. Trying the next 1-vCPU SKU."
+            continue
+        }
+        throw $message
+    }
+
+    throw "No tested 1-vCPU hub VM SKU could be allocated in $Location. Candidates: $($candidates -join ', ')."
+}
+
+function Deploy-WorkloadWithSkuFallback {
+    param(
+        [string]$ResourceGroup,
+        [string]$DeploymentName,
+        [string]$TemplateFile,
+        [string]$DeveloperSlug,
+        [string]$DeveloperDisplayName,
+        [string]$VnetName,
+        [string]$SubnetName,
+        [string]$AsgName,
+        [string]$LoadBalancerIp,
+        [string]$AdminUsername,
+        [string]$SshPublicKey,
+        [string]$BlobStorageName,
+        [string]$FileStorageName,
+        [string]$Location,
+        [string]$PreferredSku = ''
+    )
+
+    $baseCandidates = @(
+        'Standard_D1_v2',
+        'Standard_DS1_v2',
+        'Standard_F1s_v2',
+        'Standard_B1ms',
+        'Standard_B1s'
+    )
+    $candidates = if ($PreferredSku) { @($PreferredSku) + @($baseCandidates | Where-Object { $_ -ne $PreferredSku }) } else { $baseCandidates }
+
+    foreach ($sku in $candidates) {
+        Write-Host "Trying Moodle VM SKU for $DeveloperDisplayName`: $sku" -ForegroundColor DarkCyan
+        $output = & az deployment group create --resource-group $ResourceGroup --name $DeploymentName --template-file $TemplateFile --parameters developerSlug=$DeveloperSlug developerDisplayName="$DeveloperDisplayName" vnetName=$VnetName subnetName=$SubnetName asgName=$AsgName loadBalancerIp=$LoadBalancerIp adminUsername=$AdminUsername sshPublicKey=$SshPublicKey blobStorageName=$BlobStorageName fileStorageName=$FileStorageName location=$Location appVmSize=$sku --only-show-errors -o json 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            return [pscustomobject]@{
+                Result = (($output -join "`n") | ConvertFrom-Json)
+                Sku = $sku
+            }
+        }
+
+        $message = $output -join "`n"
+        if (Test-SkuCapacityFailure -Message $message) {
+            Write-Warning "SKU $sku is unavailable for $DeveloperDisplayName in $Location. Trying the next 1-vCPU SKU."
+            continue
+        }
+        throw $message
+    }
+
+    throw "No tested 1-vCPU Moodle VM SKU could be allocated in $Location for $DeveloperDisplayName."
+}
+
+function Ensure-ProjectResourceGroup {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Location
+    )
+
+    $existingLocation = & az group show --name $Name --query location -o tsv 2>$null
+    if ($LASTEXITCODE -eq 0 -and $existingLocation) {
+        $existingLocation = $existingLocation.Trim().ToLowerInvariant()
+        if ($existingLocation -ne $Location.ToLowerInvariant()) {
+            Write-Warning "Resource group '$Name' exists in '$existingLocation' but this deployment uses '$Location'. Deleting the stale TechSprint resource group and recreating it."
+            Invoke-AzCli group delete --name $Name --yes --no-wait | Out-Null
+            do {
+                Start-Sleep -Seconds 5
+                $stillExists = (& az group exists --name $Name -o tsv 2>$null).Trim()
+            } while ($stillExists -eq 'true')
+        } else {
+            return
+        }
+    }
+
+    Invoke-AzCli group create --name $Name --location $Location --tags project=techsprint environment=testing -o none | Out-Null
 }
 
 function Convert-ToSlug {
@@ -80,15 +197,19 @@ Write-Host "Location: $Location"
 Write-Host "Developers: $($developers.Count)"
 Write-Host "Bicep: $((Invoke-AzCli bicep version) -join ' ')"
 
-Invoke-AzCli group create --name $hubRg --location $Location --tags project=techsprint environment=testing -o none | Out-Null
+Ensure-ProjectResourceGroup -Name $hubRg -Location $Location
 
 Write-Host "`n[1/6] Deploying hub, jump host and DevOps Lead VM..." -ForegroundColor Cyan
-$hubResult = Invoke-AzCli deployment group create --resource-group $hubRg --name "techsprint-hub" --template-file (Join-Path $scriptRoot "hub.bicep") --parameters adminUsername=$AdminUsername sshPublicKey=$sshPublicKey --only-show-errors -o json | ConvertFrom-Json
+$hubDeployment = Deploy-HubWithSkuFallback -ResourceGroup $hubRg -TemplateFile (Join-Path $scriptRoot "hub.bicep") -AdminUsername $AdminUsername -SshPublicKey $sshPublicKey -Location $Location
+$hubResult = $hubDeployment.Result
+$hubVmSize = $hubDeployment.Sku
+Write-Host "Selected hub VM SKU: $hubVmSize" -ForegroundColor Green
 $jumpPrivateIp = $hubResult.properties.outputs.jumpPrivateIp.value
 $jumpPublicIp = $hubResult.properties.outputs.jumpPublicIp.value
 $hubVnetName = $hubResult.properties.outputs.vnetName.value
 
 $devObjects = @()
+$selectedAppVmSize = ""
 $index = 0
 foreach ($developer in $developers) {
     $index++
@@ -101,10 +222,10 @@ foreach ($developer in $developers) {
     $blobName = New-StorageName -Slug $slug -Suffix "obj" -Hash $hash
     $fileName = New-StorageName -Slug $slug -Suffix "fil" -Hash $hash
 
-    Invoke-AzCli group create --name $rg --location $Location --tags project=techsprint environment=testing -o none | Out-Null
+    Ensure-ProjectResourceGroup -Name $rg -Location $Location
 
     Write-Host "`n[2/6] Deploying isolated network for $displayName..." -ForegroundColor Cyan
-    $netResult = Invoke-AzCli deployment group create --resource-group $rg --name "techsprint-$slug-network" --template-file (Join-Path $scriptRoot "developer-network.bicep") --parameters developerSlug=$slug addressPrefix=$vnetPrefix subnetPrefix=$subnetPrefix jumpPrivateIp=$jumpPrivateIp --only-show-errors -o json | ConvertFrom-Json
+    $netResult = Invoke-AzCli deployment group create --resource-group $rg --name "techsprint-$slug-network" --template-file (Join-Path $scriptRoot "developer-network.bicep") --parameters developerSlug=$slug addressPrefix=$vnetPrefix subnetPrefix=$subnetPrefix jumpPrivateIp=$jumpPrivateIp location=$Location --only-show-errors -o json | ConvertFrom-Json
     $devVnetName = $netResult.properties.outputs.vnetName.value
     $devSubnetName = $netResult.properties.outputs.subnetName.value
     $asgName = $netResult.properties.outputs.asgName.value
@@ -116,7 +237,15 @@ foreach ($developer in $developers) {
     Invoke-AzCli network vnet peering create -g $rg --vnet-name $devVnetName -n "peer-$slug-to-hub" --remote-vnet $hubVnetId --allow-vnet-access --allow-forwarded-traffic -o none | Out-Null
 
     Write-Host "[4/6] Deploying Moodle workload, storage and load balancer for $displayName..." -ForegroundColor Cyan
-    $workResult = Invoke-AzCli deployment group create --resource-group $rg --name "techsprint-$slug-workload" --template-file (Join-Path $scriptRoot "developer-workload.bicep") --parameters developerSlug=$slug developerDisplayName="$displayName" vnetName=$devVnetName subnetName=$devSubnetName asgName=$asgName loadBalancerIp=$lbIp adminUsername=$AdminUsername sshPublicKey=$sshPublicKey blobStorageName=$blobName fileStorageName=$fileName --only-show-errors -o json | ConvertFrom-Json
+    $preferredAppSku = if ($index -eq 1) { "" } else { $selectedAppVmSize }
+    $workDeployment = Deploy-WorkloadWithSkuFallback -ResourceGroup $rg -DeploymentName "techsprint-$slug-workload" -TemplateFile (Join-Path $scriptRoot "developer-workload.bicep") -DeveloperSlug $slug -DeveloperDisplayName $displayName -VnetName $devVnetName -SubnetName $devSubnetName -AsgName $asgName -LoadBalancerIp $lbIp -AdminUsername $AdminUsername -SshPublicKey $sshPublicKey -BlobStorageName $blobName -FileStorageName $fileName -Location $Location -PreferredSku $preferredAppSku
+    $workResult = $workDeployment.Result
+    if ($index -eq 1) {
+        $selectedAppVmSize = $workDeployment.Sku
+        Write-Host "Selected Moodle VM SKU: $selectedAppVmSize" -ForegroundColor Green
+    } elseif ($workDeployment.Sku -ne $selectedAppVmSize) {
+        Write-Warning "Second developer required fallback SKU $($workDeployment.Sku) instead of $selectedAppVmSize due current Azure capacity/quota."
+    }
 
     $vm1 = $workResult.properties.outputs.vm1Name.value
     $vm2 = $workResult.properties.outputs.vm2Name.value
@@ -143,6 +272,7 @@ foreach ($developer in $developers) {
         Vm2 = $vm2
         BlobStorage = $blobName
         FileStorage = $fileName
+        VmSize = $workDeployment.Sku
     }
 }
 
@@ -234,6 +364,7 @@ $summary = [ordered]@{
     JumpPublicIp = $jumpPublicIp
     JumpPrivateIp = $jumpPrivateIp
     LeadPrivateIp = '10.0.0.5'
+    HubVmSize = $hubVmSize
     Developers = @($devObjects | ForEach-Object {
         [ordered]@{
             Name = $_.DisplayName
@@ -243,6 +374,7 @@ $summary = [ordered]@{
             VMs = @($_.Vm1,$_.Vm2)
             BlobStorage = $_.BlobStorage
             FileStorage = $_.FileStorage
+            VmSize = $_.VmSize
         }
     })
 }

@@ -3,8 +3,8 @@ targetScope = 'resourceGroup'
 param location string = resourceGroup().location
 param adminUsername string
 param sshPublicKey string
-param jumpVmSize string = 'Standard_A1_v2'
-param leadVmSize string = 'Standard_A1_v2'
+param jumpVmSize string = 'Standard_B1ms'
+param leadVmSize string = 'Standard_B1ms'
 param tags object = {
   project: 'techsprint'
   environment: 'testing'
