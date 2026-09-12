@@ -1,0 +1,360 @@
+heat_template_version: 2018-08-31
+
+description: TechSprint per-developer OpenStack environment
+
+parameters:
+  developer_slug:
+    type: string
+  image:
+    type: string
+    default: rhel8-web
+  flavor:
+    type: string
+    default: ts-app-2c4g
+  key_name:
+    type: string
+    default: techsprint-key
+  external_network:
+    type: string
+    default: provider-datacentre
+  private_cidr:
+    type: string
+  private_gateway:
+    type: string
+  mgmt_network:
+    type: string
+  mgmt_subnet:
+    type: string
+  app1_mgmt_ip:
+    type: string
+  app2_mgmt_ip:
+    type: string
+  lb_vip:
+    type: string
+  volume_type:
+    type: string
+    default: tripleo
+
+resources:
+  private_net:
+    type: OS::Neutron::Net
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-net
+          params: { SLUG: { get_param: developer_slug } }
+      tags: [project=techsprint, environment=testing]
+
+  private_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-subnet
+          params: { SLUG: { get_param: developer_slug } }
+      network: { get_resource: private_net }
+      cidr: { get_param: private_cidr }
+      gateway_ip: { get_param: private_gateway }
+      ip_version: 4
+      enable_dhcp: true
+      dns_nameservers: [8.8.8.8, 1.1.1.1]
+      tags: [project=techsprint, environment=testing]
+
+  router:
+    type: OS::Neutron::Router
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-router
+          params: { SLUG: { get_param: developer_slug } }
+      external_gateway_info:
+        network: { get_param: external_network }
+      tags: [project=techsprint, environment=testing]
+
+  router_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router: { get_resource: router }
+      subnet: { get_resource: private_subnet }
+
+  app_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-app-sg
+          params: { SLUG: { get_param: developer_slug } }
+      description: TechSprint application SG - SSH and HTTP only from jump host
+      rules:
+        - direction: ingress
+          protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+          remote_ip_prefix: 10.250.0.10/32
+        - direction: ingress
+          protocol: tcp
+          port_range_min: 80
+          port_range_max: 80
+          remote_ip_prefix: 10.250.0.10/32
+        - direction: ingress
+          protocol: tcp
+          port_range_min: 80
+          port_range_max: 80
+          remote_ip_prefix:
+            str_replace:
+              template: IP/32
+              params: { IP: { get_param: lb_vip } }
+        - direction: ingress
+          protocol: icmp
+          remote_ip_prefix: 10.250.0.10/32
+
+  app1_private_port:
+    type: OS::Neutron::Port
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-moodle01-private
+          params: { SLUG: { get_param: developer_slug } }
+      network: { get_resource: private_net }
+      security_groups: [{ get_resource: app_security_group }]
+      tags: [project=techsprint, environment=testing]
+      fixed_ips:
+        - subnet: { get_resource: private_subnet }
+
+  app2_private_port:
+    type: OS::Neutron::Port
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-moodle02-private
+          params: { SLUG: { get_param: developer_slug } }
+      network: { get_resource: private_net }
+      security_groups: [{ get_resource: app_security_group }]
+      tags: [project=techsprint, environment=testing]
+      fixed_ips:
+        - subnet: { get_resource: private_subnet }
+
+  app1_mgmt_port:
+    type: OS::Neutron::Port
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-moodle01-mgmt
+          params: { SLUG: { get_param: developer_slug } }
+      network: { get_param: mgmt_network }
+      security_groups: [{ get_resource: app_security_group }]
+      tags: [project=techsprint, environment=testing]
+      fixed_ips:
+        - subnet: { get_param: mgmt_subnet }
+          ip_address: { get_param: app1_mgmt_ip }
+
+  app2_mgmt_port:
+    type: OS::Neutron::Port
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-moodle02-mgmt
+          params: { SLUG: { get_param: developer_slug } }
+      network: { get_param: mgmt_network }
+      security_groups: [{ get_resource: app_security_group }]
+      tags: [project=techsprint, environment=testing]
+      fixed_ips:
+        - subnet: { get_param: mgmt_subnet }
+          ip_address: { get_param: app2_mgmt_ip }
+
+  object_container:
+    type: OS::Swift::Container
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-objects
+          params: { SLUG: { get_param: developer_slug } }
+      X-Container-Meta:
+        project: techsprint
+        environment: testing
+
+  app1_os:
+    type: OS::Cinder::Volume
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-moodle01-os
+          params: { SLUG: { get_param: developer_slug } }
+      size: 10
+      image: { get_param: image }
+      volume_type: { get_param: volume_type }
+      metadata:
+        project: techsprint
+        environment: testing
+        disk_role: os
+
+  app1_data:
+    type: OS::Cinder::Volume
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-moodle01-data
+          params: { SLUG: { get_param: developer_slug } }
+      size: 5
+      volume_type: { get_param: volume_type }
+      metadata:
+        project: techsprint
+        environment: testing
+        disk_role: data
+
+  app2_os:
+    type: OS::Cinder::Volume
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-moodle02-os
+          params: { SLUG: { get_param: developer_slug } }
+      size: 10
+      image: { get_param: image }
+      volume_type: { get_param: volume_type }
+      metadata:
+        project: techsprint
+        environment: testing
+        disk_role: os
+
+  app2_data:
+    type: OS::Cinder::Volume
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-moodle02-data
+          params: { SLUG: { get_param: developer_slug } }
+      size: 5
+      volume_type: { get_param: volume_type }
+      metadata:
+        project: techsprint
+        environment: testing
+        disk_role: data
+
+  app1:
+    type: OS::Nova::Server
+    depends_on: [object_container, router_interface]
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-moodle01
+          params: { SLUG: { get_param: developer_slug } }
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      metadata:
+        project: techsprint
+        environment: testing
+        role: moodle
+      tags: [project=techsprint, environment=testing]
+      networks:
+        - port: { get_resource: app1_private_port }
+        - port: { get_resource: app1_mgmt_port }
+      block_device_mapping_v2:
+        - device_name: vda
+          volume_id: { get_resource: app1_os }
+          boot_index: 0
+          delete_on_termination: false
+        - device_name: vdb
+          volume_id: { get_resource: app1_data }
+          boot_index: -1
+          delete_on_termination: false
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            set -x
+            hostnamectl set-hostname ts-SLUG-moodle01
+            for i in $(seq 1 60); do [ -b /dev/vdb ] && break; sleep 2; done
+            if [ -b /dev/vdb ]; then
+              blkid /dev/vdb >/dev/null 2>&1 || mkfs.xfs -f /dev/vdb
+              mkdir -p /var/lib/moodledata
+              grep -q '/var/lib/moodledata' /etc/fstab || echo '/dev/vdb /var/lib/moodledata xfs defaults,nofail 0 2' >> /etc/fstab
+              mount /var/lib/moodledata || true
+            fi
+            mkdir -p /var/www/html
+            cat >/var/www/html/index.html <<HTML
+            <html><body><h1>TechSprint Moodle</h1><p>Developer: SLUG</p><p>Node: moodle01</p></body></html>
+            HTML
+            systemctl enable --now httpd || true
+            timeout 300 dnf -y install httpd curl git php php-cli php-mysqlnd php-gd php-intl php-xml php-mbstring mariadb-server || true
+            systemctl enable --now httpd || true
+            systemctl enable --now mariadb || true
+            if [ ! -d /var/www/html/moodle ]; then
+              git clone --depth 1 --branch MOODLE_401_STABLE https://github.com/moodle/moodle.git /var/www/html/moodle || true
+              chown -R apache:apache /var/www/html/moodle /var/lib/moodledata 2>/dev/null || true
+            fi
+          params:
+            SLUG: { get_param: developer_slug }
+
+  app2:
+    type: OS::Nova::Server
+    depends_on: [object_container, router_interface]
+    properties:
+      name:
+        str_replace:
+          template: ts-SLUG-moodle02
+          params: { SLUG: { get_param: developer_slug } }
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      metadata:
+        project: techsprint
+        environment: testing
+        role: moodle
+      tags: [project=techsprint, environment=testing]
+      networks:
+        - port: { get_resource: app2_private_port }
+        - port: { get_resource: app2_mgmt_port }
+      block_device_mapping_v2:
+        - device_name: vda
+          volume_id: { get_resource: app2_os }
+          boot_index: 0
+          delete_on_termination: false
+        - device_name: vdb
+          volume_id: { get_resource: app2_data }
+          boot_index: -1
+          delete_on_termination: false
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            set -x
+            hostnamectl set-hostname ts-SLUG-moodle02
+            for i in $(seq 1 60); do [ -b /dev/vdb ] && break; sleep 2; done
+            if [ -b /dev/vdb ]; then
+              blkid /dev/vdb >/dev/null 2>&1 || mkfs.xfs -f /dev/vdb
+              mkdir -p /var/lib/moodledata
+              grep -q '/var/lib/moodledata' /etc/fstab || echo '/dev/vdb /var/lib/moodledata xfs defaults,nofail 0 2' >> /etc/fstab
+              mount /var/lib/moodledata || true
+            fi
+            mkdir -p /var/www/html
+            cat >/var/www/html/index.html <<HTML
+            <html><body><h1>TechSprint Moodle</h1><p>Developer: SLUG</p><p>Node: moodle02</p></body></html>
+            HTML
+            systemctl enable --now httpd || true
+            timeout 300 dnf -y install httpd curl git php php-cli php-mysqlnd php-gd php-intl php-xml php-mbstring mariadb-server || true
+            systemctl enable --now httpd || true
+            systemctl enable --now mariadb || true
+            if [ ! -d /var/www/html/moodle ]; then
+              git clone --depth 1 --branch MOODLE_401_STABLE https://github.com/moodle/moodle.git /var/www/html/moodle || true
+              chown -R apache:apache /var/www/html/moodle /var/lib/moodledata 2>/dev/null || true
+            fi
+          params:
+            SLUG: { get_param: developer_slug }
+
+outputs:
+  private_network:
+    value: { get_resource: private_net }
+  app1_private_ip:
+    value: { get_attr: [app1_private_port, fixed_ips, 0, ip_address] }
+  app2_private_ip:
+    value: { get_attr: [app2_private_port, fixed_ips, 0, ip_address] }
+  app1_mgmt_ip:
+    value: { get_param: app1_mgmt_ip }
+  app2_mgmt_ip:
+    value: { get_param: app2_mgmt_ip }
+  load_balancer_vip:
+    value: { get_param: lb_vip }
+  object_container:
+    value: { get_resource: object_container }
