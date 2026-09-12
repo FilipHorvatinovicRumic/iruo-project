@@ -1,4 +1,4 @@
-# TechSprint Azure Deployment FINAL_v10
+# TechSprint Azure Deployment FINAL_v13
 
 This package implements the required multi-region architecture while accounting for the Azure for Students 6-vCPU-per-region limit.
 
@@ -31,6 +31,16 @@ Failures from non-Compute resources are reported immediately instead of being mi
 ```
 
 This reads subscription SKU/quota information but does not accept Marketplace terms, create resources or identities, or write local secrets.
+It also prints the exact proposed developer-to-region assignment and identifies any existing VM pair that will be reused. Bicep is not required for this mode; a real deployment installs it automatically if missing.
+
+To reuse the most recently observed capacity snapshot and skip all regional SKU/quota scans:
+
+```powershell
+./deploy.ps1 -CsvPath ./users.csv -PlanOnly -UseObservedCapacity
+./deploy.ps1 -CsvPath ./users.csv -UseObservedCapacity
+```
+
+This snapshot records Switzerland North as eligible with `Standard_B2ls_v2`, `Standard_B2als_v2`, and `Standard_B2s_v2`; Germany West Central and Spain Central had no eligible subscription SKU/family quota, and Poland Central had only 2 of the required 4 vCPUs free. Real allocation can still change, so the normal live-discovery mode remains available by omitting `-UseObservedCapacity`.
 
 ## Deploy
 
@@ -47,7 +57,7 @@ Optional region and retry configuration:
   -MaxSkuAttemptsPerRegion 3
 ```
 
-The script is safe to rerun. Existing complete VM pairs are reused, while Bicep reconciles the rest of the named TechSprint resources.
+The script is safe to rerun. Existing complete VM pairs are not resubmitted through Bicep because Azure does not allow changing their VM-model SSH configuration. Their surrounding network is reconciled, required workload resources are checked, and the current Cloud Shell public key is appended through the VM Access extension. The same SSH refresh is applied to an existing Jump and Lead VM pair.
 
 ## Verify
 

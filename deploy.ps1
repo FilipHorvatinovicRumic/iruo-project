@@ -6,6 +6,7 @@ param(
     [string]$AdminUsername = "azureadmin",
     [ValidateRange(1, 10)]
     [int]$MaxSkuAttemptsPerRegion = 3,
+    [switch]$UseObservedCapacity,
     [switch]$PlanOnly
 )
 
@@ -267,6 +268,41 @@ function Ensure-RoleAssignment {
     throw "Role assignment '$Role' failed for principal $ObjectId at scope $Scope after 8 attempts:`n$lastMessage"
 }
 
+function Update-VmSshKey {
+    param(
+        [Parameter(Mandatory=$true)][string]$ResourceGroup,
+        [Parameter(Mandatory=$true)][string]$VmName,
+        [Parameter(Mandatory=$true)][string]$Username,
+        [Parameter(Mandatory=$true)][string]$PublicKey
+    )
+
+    Write-Host "Refreshing SSH access on existing VM $VmName..." -ForegroundColor DarkCyan
+    $result = & az vm user update --resource-group $ResourceGroup --name $VmName --username $Username --ssh-key-value $PublicKey --only-show-errors -o none 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not add the current Cloud Shell SSH key to existing VM '$VmName':`n$($result -join "`n")"
+    }
+}
+
+function New-ReusedWorkloadResult {
+    param(
+        [string]$Vm1Name,[string]$Vm2Name,[string]$Vm1PrincipalId,[string]$Vm2PrincipalId,
+        [string]$BlobStorageId,[string]$BlobStorageName,[string]$FileStorageName
+    )
+    return [pscustomobject]@{
+        properties = [pscustomobject]@{
+            outputs = [pscustomobject]@{
+                vm1Name = [pscustomobject]@{value=$Vm1Name}
+                vm2Name = [pscustomobject]@{value=$Vm2Name}
+                vm1PrincipalId = [pscustomobject]@{value=$Vm1PrincipalId}
+                vm2PrincipalId = [pscustomobject]@{value=$Vm2PrincipalId}
+                blobStorageId = [pscustomobject]@{value=$BlobStorageId}
+                blobStorageName = [pscustomobject]@{value=$BlobStorageName}
+                fileStorageName = [pscustomobject]@{value=$FileStorageName}
+            }
+        }
+    }
+}
+
 $scriptRoot=Split-Path -Parent $MyInvocation.MyCommand.Path
 $csvFullPath=(Resolve-Path $CsvPath).Path
 $users=Import-Csv -Path $csvFullPath -Delimiter ';'
@@ -291,27 +327,52 @@ $secretDir=Join-Path $scriptRoot ".secrets"
 $secretFile=Join-Path $secretDir "entra-users.txt"
 
 Write-Host "=== TechSprint Azure deployment ===" -ForegroundColor Cyan
-Write-Host "Package: FINAL_v10 - quota-aware SKU discovery + bounded allocation fallback" -ForegroundColor Green
+Write-Host "Package: FINAL_v13 - immutable-safe reuse + cached-capacity fast path" -ForegroundColor Green
 Write-Host "Subscription: $($account.name)"
 Write-Host "Hub: $HubLocation -> Jump VM + separate DevOps Lead VM"
 Write-Host "Developer regions will be selected automatically from: $($DeveloperRegionPool -join ' , ')"
 Write-Host "Each developer remains in a separate region and gets 2 Moodle VMs (2 vCPU / >=4 GiB each)."
-Write-Host "Bicep: $((Invoke-AzCli bicep version) -join ' ')"
+if ($PlanOnly) {
+    Write-Host "Bicep: not required in plan-only mode"
+} else {
+    $bicepVersion = & az bicep version 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Bicep CLI is missing; installing it with Azure CLI..." -ForegroundColor Yellow
+        Invoke-AzCli bicep install | Out-Null
+        $bicepVersion = Invoke-AzCli bicep version
+    }
+    Write-Host "Bicep: $($bicepVersion -join ' ')"
+}
 
-Write-Host "`n[PLAN] Discovering subscription-eligible capacity before creating resources..." -ForegroundColor Cyan
+Write-Host "`n[PLAN] Resolving developer capacity before creating resources..." -ForegroundColor Cyan
 $developerRegionPlans = @{}
-foreach ($location in $DeveloperRegionPool) {
-    $plan = Get-EligibleSkuPlan -Location $location -VmCount 2
-    $developerRegionPlans[$location.ToLowerInvariant()] = $plan
-    if ($plan.Candidates.Count -gt 0) {
-        $candidateText = @($plan.Candidates | ForEach-Object { "$($_.Name) ($($_.MemoryGB) GiB)" }) -join ', '
-        Write-Host "  $location`: $candidateText" -ForegroundColor Green
-    } else {
-        Write-Warning "$location skipped: $($plan.Reason)."
+if ($UseObservedCapacity) {
+    Write-Host "Using the supplied capacity snapshot; live regional SKU/quota scans are skipped." -ForegroundColor Yellow
+    $observedSwissCandidates = @(
+        [pscustomobject]@{Name='Standard_B2ls_v2';Family='observed';MemoryGB=4;Score=0},
+        [pscustomobject]@{Name='Standard_B2als_v2';Family='observed';MemoryGB=4;Score=1},
+        [pscustomobject]@{Name='Standard_B2s_v2';Family='observed';MemoryGB=8;Score=2}
+    ) | Select-Object -First $MaxSkuAttemptsPerRegion
+    foreach ($location in $DeveloperRegionPool) {
+        $candidates = if ($location -eq 'switzerlandnorth') { @($observedSwissCandidates) } else { @() }
+        $reason = if ($location -eq 'polandcentral') { 'observed regional quota has only 2 free vCPUs; 4 required' } else { 'observed as having no eligible unrestricted SKU/family quota' }
+        $developerRegionPlans[$location.ToLowerInvariant()] = [pscustomobject]@{Location=$location;Candidates=$candidates;Reason=$reason}
+    }
+    Write-Host "  switzerlandnorth: Standard_B2ls_v2 (4 GiB), Standard_B2als_v2 (4 GiB), Standard_B2s_v2 (8 GiB)" -ForegroundColor Green
+    Write-Host "  germanywestcentral, polandcentral, spaincentral: skipped from supplied results" -ForegroundColor DarkGray
+} else {
+    foreach ($location in $DeveloperRegionPool) {
+        $plan = Get-EligibleSkuPlan -Location $location -VmCount 2
+        $developerRegionPlans[$location.ToLowerInvariant()] = $plan
+        if ($plan.Candidates.Count -gt 0) {
+            $candidateText = @($plan.Candidates | ForEach-Object { "$($_.Name) ($($_.MemoryGB) GiB)" }) -join ', '
+            Write-Host "  $location`: $candidateText" -ForegroundColor Green
+        } else {
+            Write-Warning "$location skipped: $($plan.Reason)."
+        }
     }
 }
-$eligibleDeveloperRegions = @($DeveloperRegionPool | Where-Object { $developerRegionPlans[$_.ToLowerInvariant()].Candidates.Count -gt 0 })
-$existingDeveloperRegions = @()
+$existingDeveloperPlacements = @{}
 foreach ($developer in $developers) {
     $slug = Convert-ToSlug "$($developer.ime)$($developer.prezime)"
     $expectedNames = @("vm-ts-$slug-app01", "vm-ts-$slug-app02")
@@ -321,11 +382,41 @@ foreach ($developer in $developers) {
         $_.name -in $expectedNames -and $_.plan.name -eq '9-base' -and $_.plan.product -eq 'rockylinux-x86_64' -and $_.plan.publisher -eq 'resf'
     })
     $locations = @($compatible.location | Where-Object { $_ -in $DeveloperRegionPool } | Select-Object -Unique)
-    if ($compatible.Count -eq 2 -and $locations.Count -eq 1) { $existingDeveloperRegions += $locations[0] }
+    $sizes = @($compatible.hardwareProfile.vmSize | Where-Object { $_ } | Select-Object -Unique)
+    if ($compatible.Count -eq 2 -and $locations.Count -eq 1 -and $sizes.Count -eq 1) {
+        $existingDeveloperPlacements[$slug] = [pscustomobject]@{ Location=$locations[0]; Sku=$sizes[0] }
+    }
 }
-$possiblePlacementRegions = @((@($eligibleDeveloperRegions) + @($existingDeveloperRegions)) | Select-Object -Unique)
-if ($possiblePlacementRegions.Count -lt $developers.Count) {
-    throw "Only $($possiblePlacementRegions.Count) distinct developer region(s) can reuse or host a compliant VM pair; $($developers.Count) are required. No resources were changed."
+
+Write-Host "`n[PLAN] Proposed developer placement:" -ForegroundColor Cyan
+$plannedDeveloperAssignments = @()
+$plannedRegions = @()
+for ($index=1; $index -le $developers.Count; $index++) {
+    $developer = $developers[$index-1]
+    $slug = Convert-ToSlug "$($developer.ime)$($developer.prezime)"
+    $displayName = "$($developer.ime) $($developer.prezime)"
+    $regionOrder = @()
+    if ($existingDeveloperPlacements.ContainsKey($slug)) { $regionOrder += $existingDeveloperPlacements[$slug].Location }
+    for ($offset=0; $offset -lt $DeveloperRegionPool.Count; $offset++) {
+        $regionOrder += $DeveloperRegionPool[(($index-1+$offset) % $DeveloperRegionPool.Count)]
+    }
+    $selected = $null
+    foreach ($location in @($regionOrder | Select-Object -Unique)) {
+        if ($location -in $plannedRegions) { continue }
+        if ($existingDeveloperPlacements.ContainsKey($slug) -and $existingDeveloperPlacements[$slug].Location -eq $location) {
+            $selected = [pscustomobject]@{ Name=$displayName; Location=$location; Sku=$existingDeveloperPlacements[$slug].Sku; Mode='reuse existing pair' }
+            break
+        }
+        $regionPlan = $developerRegionPlans[$location.ToLowerInvariant()]
+        if ($regionPlan.Candidates.Count -gt 0) {
+            $selected = [pscustomobject]@{ Name=$displayName; Location=$location; Sku=$regionPlan.Candidates[0].Name; Mode='new deployment' }
+            break
+        }
+    }
+    if (-not $selected) { throw "No valid distinct-region placement exists for $displayName. No resources were changed." }
+    $plannedDeveloperAssignments += $selected
+    $plannedRegions += $selected.Location
+    Write-Host "  $($selected.Name) -> $($selected.Location) / $($selected.Sku) [$($selected.Mode)]" -ForegroundColor Green
 }
 
 $jumpJson = & az vm show -g $hubRg -n 'vm-ts-jump-test' --only-show-errors -o json 2>$null
@@ -370,6 +461,8 @@ Ensure-ProjectResourceGroup -Name $hubRg -Location $HubLocation
 Remove-IncompatibleMarketplaceVm -ResourceGroup $hubRg -VmNames @('vm-ts-jump-test','vm-ts-lead-test')
 if ($jumpExists -and $leadExists) {
     Write-Host "`n[1/6] Existing compliant hub detected; reusing Jump and separate DevOps Lead VMs." -ForegroundColor Green
+    Update-VmSshKey -ResourceGroup $hubRg -VmName 'vm-ts-jump-test' -Username $AdminUsername -PublicKey $sshPublicKey
+    Update-VmSshKey -ResourceGroup $hubRg -VmName 'vm-ts-lead-test' -Username $AdminUsername -PublicKey $sshPublicKey
     $hubVnetName='vnet-ts-hub-test'
     $jumpPrivateIp=(& az network nic show -g $hubRg -n 'nic-ts-jump-test' --query 'ipConfigurations[0].privateIPAddress' -o tsv).Trim()
     $leadPrivateIp=(& az network nic show -g $hubRg -n 'nic-ts-lead-test' --query 'ipConfigurations[0].privateIPAddress' -o tsv).Trim()
@@ -428,7 +521,9 @@ for($index=1;$index -le $developers.Count;$index++){
     foreach($candidateRegion in $regionOrder){
         Write-Host "`nEvaluating region $candidateRegion for $displayName..." -ForegroundColor Magenta
         $existingHere = @($existingVms | Where-Object { $_.location -eq $candidateRegion })
+        $reuseExistingPair = $false
         if ($existingHere.Count -eq 2 -and @($existingHere.hardwareProfile.vmSize | Select-Object -Unique).Count -eq 1) {
+            $reuseExistingPair = $true
             $currentSku = [string]$existingHere[0].hardwareProfile.vmSize
             $skuPlan = [pscustomobject]@{
                 Location=$candidateRegion
@@ -468,8 +563,23 @@ for($index=1;$index -le $developers.Count;$index++){
         Invoke-AzCli network vnet peering create -g $rg --vnet-name $candidateVnetName -n "peer-$slug-to-hub" --remote-vnet $hubVnetId --allow-vnet-access --allow-forwarded-traffic -o none|Out-Null
 
         Remove-IncompatibleMarketplaceVm -ResourceGroup $rg -VmNames @("vm-ts-$slug-app01","vm-ts-$slug-app02")
-        Write-Host "[4/6] Deploying workload with the quota-eligible SKU shortlist..." -ForegroundColor Cyan
-        $candidateDeployment=Deploy-WorkloadWithSkuFallback -ResourceGroup $rg -DeploymentName "techsprint-$slug-workload" -TemplateFile (Join-Path $scriptRoot "developer-workload.bicep") -DeveloperSlug $slug -DeveloperDisplayName $displayName -VnetName $candidateVnetName -SubnetName $candidateSubnetName -AsgName $candidateAsgName -LoadBalancerIp $lbIp -AdminUsername $AdminUsername -SshPublicKey $sshPublicKey -BlobStorageName $blobName -FileStorageName $fileName -Location $candidateRegion -Candidates $skuPlan.Candidates
+        if ($reuseExistingPair) {
+            Write-Host "[4/6] Reusing existing workload without resubmitting immutable VM OS settings..." -ForegroundColor Cyan
+            $vm1Name = "vm-ts-$slug-app01"
+            $vm2Name = "vm-ts-$slug-app02"
+            Update-VmSshKey -ResourceGroup $rg -VmName $vm1Name -Username $AdminUsername -PublicKey $sshPublicKey
+            Update-VmSshKey -ResourceGroup $rg -VmName $vm2Name -Username $AdminUsername -PublicKey $sshPublicKey
+            $vm1PrincipalId = (Invoke-AzCli vm show -g $rg -n $vm1Name --query identity.principalId --only-show-errors -o tsv).Trim()
+            $vm2PrincipalId = (Invoke-AzCli vm show -g $rg -n $vm2Name --query identity.principalId --only-show-errors -o tsv).Trim()
+            $blobId = (Invoke-AzCli storage account show -g $rg -n $blobName --query id --only-show-errors -o tsv).Trim()
+            Invoke-AzCli storage account show -g $rg -n $fileName --query id --only-show-errors -o tsv | Out-Null
+            Invoke-AzCli network lb show -g $rg -n "lb-ts-$slug-int" --query id --only-show-errors -o tsv | Out-Null
+            $reusedResult = New-ReusedWorkloadResult -Vm1Name $vm1Name -Vm2Name $vm2Name -Vm1PrincipalId $vm1PrincipalId -Vm2PrincipalId $vm2PrincipalId -BlobStorageId $blobId -BlobStorageName $blobName -FileStorageName $fileName
+            $candidateDeployment = [pscustomobject]@{Result=$reusedResult;Sku=$currentSku;Reused=$true}
+        } else {
+            Write-Host "[4/6] Deploying workload with the quota-eligible SKU shortlist..." -ForegroundColor Cyan
+            $candidateDeployment=Deploy-WorkloadWithSkuFallback -ResourceGroup $rg -DeploymentName "techsprint-$slug-workload" -TemplateFile (Join-Path $scriptRoot "developer-workload.bicep") -DeveloperSlug $slug -DeveloperDisplayName $displayName -VnetName $candidateVnetName -SubnetName $candidateSubnetName -AsgName $candidateAsgName -LoadBalancerIp $lbIp -AdminUsername $AdminUsername -SshPublicKey $sshPublicKey -BlobStorageName $blobName -FileStorageName $fileName -Location $candidateRegion -Candidates $skuPlan.Candidates
+        }
         if($candidateDeployment){
             $workDeployment=$candidateDeployment
             $devLocation=$candidateRegion

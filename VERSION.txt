@@ -1,4 +1,4 @@
-TechSprint Azure Deployment FINAL_v10
+TechSprint Azure Deployment FINAL_v13
 Architecture: multi-region with separate Jump Host and DevOps Lead VMs
 Developer placement: subscription-aware SKU discovery plus regional and VM-family quota checks
 Moodle VM requirement: exactly 2 vCPU and >=4 GiB RAM per application VM
@@ -7,4 +7,8 @@ Region fallback: occurs only after SKU/quota screening and genuine Compute alloc
 Rerun behavior: existing complete VM pairs are reused
 Safety: failed resource groups are deleted only when expected TechSprint tags are present
 Plan-only mode: available with -PlanOnly and makes no resource or local-secret changes
+Bicep bootstrap: automatic for real deployments and skipped in plan-only mode
+Placement output: exact developer, region, SKU and reuse/new mode shown before deployment
+Observed-capacity fast path: -UseObservedCapacity skips repeated regional discovery using the latest supplied results
+Immutable-safe reuse: existing VM pairs bypass Bicep VM PUT and receive the current SSH key through VM Access
 Rocky Linux Marketplace plan metadata/terms: enabled
