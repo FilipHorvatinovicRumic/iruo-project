@@ -327,7 +327,7 @@ $secretDir=Join-Path $scriptRoot ".secrets"
 $secretFile=Join-Path $secretDir "entra-users.txt"
 
 Write-Host "=== TechSprint Azure deployment ===" -ForegroundColor Cyan
-Write-Host "Package: FINAL_v13 - immutable-safe reuse + cached-capacity fast path" -ForegroundColor Green
+Write-Host "Package: FINAL_v14 - immutable-safe reuse + cached-capacity fast path" -ForegroundColor Green
 Write-Host "Subscription: $($account.name)"
 Write-Host "Hub: $HubLocation -> Jump VM + separate DevOps Lead VM"
 Write-Host "Developer regions will be selected automatically from: $($DeveloperRegionPool -join ' , ')"
@@ -604,8 +604,8 @@ for($index=1;$index -le $developers.Count;$index++){
     $vm1Pid=$workResult.properties.outputs.vm1PrincipalId.value
     $vm2Pid=$workResult.properties.outputs.vm2PrincipalId.value
     $blobId=$workResult.properties.outputs.blobStorageId.value
-    foreach($pid in @($vm1Pid,$vm2Pid)){
-        Ensure-RoleAssignment -ObjectId $pid -PrincipalType ServicePrincipal -Role "Storage Blob Data Contributor" -Scope $blobId
+    foreach($principalId in @($vm1Pid,$vm2Pid)){
+        Ensure-RoleAssignment -ObjectId $principalId -PrincipalType ServicePrincipal -Role "Storage Blob Data Contributor" -Scope $blobId
     }
     $devObjects += [pscustomobject]@{User=$developer;Slug=$slug;DisplayName=$displayName;Location=$devLocation;ResourceGroup=$rg;VnetName=$devVnetName;LoadBalancerIp=$lbIp;Vm1=$vm1;Vm2=$vm2;BlobStorage=$blobName;FileStorage=$fileName;VmSize=$workDeployment.Sku}
 

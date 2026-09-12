@@ -1,4 +1,4 @@
-# TechSprint Azure Deployment FINAL_v13
+# TechSprint Azure Deployment FINAL_v14
 
 This package implements the required multi-region architecture while accounting for the Azure for Students 6-vCPU-per-region limit.
 

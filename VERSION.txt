@@ -1,4 +1,4 @@
-TechSprint Azure Deployment FINAL_v13
+TechSprint Azure Deployment FINAL_v14
 Architecture: multi-region with separate Jump Host and DevOps Lead VMs
 Developer placement: subscription-aware SKU discovery plus regional and VM-family quota checks
 Moodle VM requirement: exactly 2 vCPU and >=4 GiB RAM per application VM
