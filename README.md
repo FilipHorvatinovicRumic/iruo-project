@@ -1,22 +1,53 @@
-# TechSprint Azure deployment
+# TechSprint Azure Deployment FINAL_v10
 
-Single-run Azure deployment for the IRUO project.
+This package implements the required multi-region architecture while accounting for the Azure for Students 6-vCPU-per-region limit.
 
-## Input
+## Architecture
 
-`users.csv` uses `;` as delimiter and supports `developer` and `devops_lead` roles.
+- France Central: one public Jump Host VM and one separate private DevOps Lead VM.
+- Two developers: one resource group and one distinct allowed region per developer.
+- Each developer gets two Moodle VMs. Every selected VM SKU has exactly 2 vCPUs and at least 4 GiB RAM.
+- Only the Jump Host has a public IP.
+- Hub/spoke connectivity uses Global VNet Peering with forwarded traffic enabled.
+- Each developer receives a VNet, NSG/ASG, internal Standard Load Balancer, Blob Storage, Azure Files NFS storage, and two VMs with OS and data disks.
+- CSV-driven IAM/RBAC limits developers to VM power operations in their own resource group; the lead receives that role across all project resource groups.
 
-## Run
+## Capacity selection
+
+The deployment does not validate a large hard-coded SKU list one item at a time. It instead:
+
+1. Calls `az vm list-skus` once for each allowed region and removes subscription-restricted, non-x64, and non-compliant VM sizes.
+2. Calls `az vm list-usage` once for each region and checks both total regional and VM-family vCPU quota.
+3. Ranks inexpensive general-purpose sizes and keeps at most three candidates per region by default.
+4. Creates a developer network only after the region has passed these checks.
+5. Performs a real deployment attempt because Azure does not expose guaranteed live physical capacity. On a genuine Compute allocation failure it tries the next shortlisted SKU, then another eligible region.
+
+Failures from non-Compute resources are reported immediately instead of being mislabeled as VM capacity failures. A failed-region resource group is deleted only when it has the expected `project=techsprint` and `environment=testing` tags.
+
+## Inspect the plan without changing anything
 
 ```powershell
-./deploy.ps1 -CsvPath ./users.csv -Location francecentral
+./deploy.ps1 -CsvPath ./users.csv -PlanOnly
 ```
 
-The script creates a hub resource group, one resource group and isolated VNet per developer, a public jump host, a private DevOps Lead VM, two private Moodle VMs per developer, internal Standard Load Balancers, NSGs and ASGs, OS plus data disks, Blob Storage with Managed Identity access, Azure Files NFS backup storage, hub/spoke peering, a custom VM power role, and CSV-driven identities.
+This reads subscription SKU/quota information but does not accept Marketplace terms, create resources or identities, or write local secrets.
 
-Because the Azure for Students subscription used for the project has a six-vCPU regional quota, the demonstrational deployment uses one-vCPU VM SKUs. The target design remains two vCPU and four GB RAM per Moodle VM.
+## Deploy
 
-If Microsoft Entra user creation is blocked by tenant directory permissions, `deploy.ps1` automatically creates user-assigned managed identities as an RBAC demonstration fallback and records that condition in `deployment-summary.json`.
+```powershell
+./deploy.ps1 -CsvPath ./users.csv
+```
+
+Optional region and retry configuration:
+
+```powershell
+./deploy.ps1 -CsvPath ./users.csv `
+  -HubLocation francecentral `
+  -DeveloperRegionPool germanywestcentral,polandcentral,switzerlandnorth,spaincentral `
+  -MaxSkuAttemptsPerRegion 3
+```
+
+The script is safe to rerun. Existing complete VM pairs are reused, while Bicep reconciles the rest of the named TechSprint resources.
 
 ## Verify
 
@@ -30,11 +61,6 @@ If Microsoft Entra user creation is blocked by tenant directory permissions, `de
 ./cleanup.ps1
 ```
 
+## Rocky Linux Marketplace image
 
-## Azure for Students region handling
-
-The tested subscription is restricted by Azure Policy to a small allow-list of regions. This package defaults to `francecentral`. If an older interrupted run left a TechSprint resource group in another region, `deploy.ps1` detects that project-specific stale resource group, deletes it, waits for deletion, and recreates it in the requested region.
-
-## VM SKU capacity fallback
-
-Azure for Students can return `SkuNotAvailable` even for a size that exists in the selected region. The deployment therefore retries a controlled list of one-vCPU SKUs. Hub VMs prefer B-series sizes; Moodle VMs prefer D/DS v2 sizes to remain as close as possible to the requested memory specification. The actual selected SKU is written to `deployment-summary.json`.
+All VMs use `resf:rockylinux-x86_64:9-base:latest`. The templates include the required Marketplace `plan` metadata, and the deployment accepts its terms once per subscription. If an old named TechSprint VM lacks the required plan, the script removes only that incompatible VM object and recreates it; other project resources remain intact.

@@ -3,8 +3,8 @@ targetScope = 'resourceGroup'
 param location string = resourceGroup().location
 param adminUsername string
 param sshPublicKey string
-param jumpVmSize string = 'Standard_B1ms'
-param leadVmSize string = 'Standard_B1ms'
+param jumpVmSize string = 'Standard_B2ls_v2'
+param leadVmSize string = 'Standard_B2ls_v2'
 param tags object = {
   project: 'techsprint'
   environment: 'testing'
@@ -26,6 +26,11 @@ var rocky = {
   offer: 'rockylinux-x86_64'
   sku: '9-base'
   version: 'latest'
+}
+var rockyPlan = {
+  publisher: 'resf'
+  product: 'rockylinux-x86_64'
+  name: '9-base'
 }
 var jumpInit = loadTextContent('cloud-init/jump.sh')
 var leadInit = replace(loadTextContent('cloud-init/lead.sh'), '__HOSTNAME__', leadVmName)
@@ -168,6 +173,7 @@ resource jumpVm 'Microsoft.Compute/virtualMachines@2023-09-01' = {
   name: jumpVmName
   location: location
   tags: tags
+  plan: rockyPlan
   properties: {
     hardwareProfile: {
       vmSize: jumpVmSize
@@ -215,6 +221,7 @@ resource leadVm 'Microsoft.Compute/virtualMachines@2023-09-01' = {
   name: leadVmName
   location: location
   tags: tags
+  plan: rockyPlan
   properties: {
     hardwareProfile: {
       vmSize: leadVmSize

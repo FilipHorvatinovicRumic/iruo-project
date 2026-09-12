@@ -1,0 +1,10 @@
+TechSprint Azure Deployment FINAL_v10
+Architecture: multi-region with separate Jump Host and DevOps Lead VMs
+Developer placement: subscription-aware SKU discovery plus regional and VM-family quota checks
+Moodle VM requirement: exactly 2 vCPU and >=4 GiB RAM per application VM
+Allocation fallback: at most 3 ranked SKUs per region by default
+Region fallback: occurs only after SKU/quota screening and genuine Compute allocation failures
+Rerun behavior: existing complete VM pairs are reused
+Safety: failed resource groups are deleted only when expected TechSprint tags are present
+Plan-only mode: available with -PlanOnly and makes no resource or local-secret changes
+Rocky Linux Marketplace plan metadata/terms: enabled

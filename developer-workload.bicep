@@ -9,7 +9,7 @@ param asgName string
 param loadBalancerIp string
 param adminUsername string
 param sshPublicKey string
-param appVmSize string = 'Standard_D1_v2'
+param appVmSize string = 'Standard_B2ls_v2'
 param blobStorageName string
 param fileStorageName string
 param tags object = {
@@ -30,6 +30,11 @@ var rocky = {
   offer: 'rockylinux-x86_64'
   sku: '9-base'
   version: 'latest'
+}
+var rockyPlan = {
+  publisher: 'resf'
+  product: 'rockylinux-x86_64'
+  name: '9-base'
 }
 var initTemplate = loadTextContent('cloud-init/app.sh')
 var initCommon1 = replace(initTemplate, '__DEV_SLUG__', developerSlug)
@@ -268,6 +273,7 @@ resource vm1 'Microsoft.Compute/virtualMachines@2023-09-01' = {
   name: vm1Name
   location: location
   tags: tags
+  plan: rockyPlan
   identity: {
     type: 'SystemAssigned'
   }
@@ -330,6 +336,7 @@ resource vm2 'Microsoft.Compute/virtualMachines@2023-09-01' = {
   name: vm2Name
   location: location
   tags: tags
+  plan: rockyPlan
   identity: {
     type: 'SystemAssigned'
   }
